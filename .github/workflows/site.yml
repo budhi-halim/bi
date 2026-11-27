@@ -1,0 +1,104 @@
+name: BI - Update, Verify and Publish
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+  schedule:
+    # BI transaction rates are published at 08:00 WIB on business days.
+    # Refresh at 08:30, 10:30 and 16:30 WIB; Saturday catch-up at 10:00 WIB.
+    - cron: '30 1,3,9 * * 1-5'
+    - cron: '0 3 * * 6'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: bi-data
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: master
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate calculations, ingestion and numeric Excel export
+        run: |
+          node --check docs/app.js
+          node --check docs/calculations.js
+          node --check docs/xlsx.js
+          node --check scripts/browser-test.mjs
+          node scripts/test.mjs
+          node scripts/update-test.mjs
+          node scripts/xlsx-test.mjs
+      - name: Refresh official Bank Indonesia transaction rates
+        id: refresh
+        run: node scripts/update.mjs
+      - name: Retain verified data and bootstrap checkpoints
+        if: always() && steps.refresh.outcome != 'skipped'
+        run: |
+          if test -f docs/data/bi.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/data/bi.json
+            if ! git diff --cached --quiet; then
+              git commit -m "data: refresh official BI transaction rates"
+              git pull --rebase origin master
+              git push origin HEAD:master
+            fi
+          fi
+      - name: Validate refreshed snapshot
+        run: node scripts/test.mjs
+      - name: Install browser regression tools
+        run: |
+          npm install --no-save --package-lock=false playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - name: Check desktop, mobile, all three averages and Excel downloads
+        run: node scripts/browser-test.mjs
+      - name: Keep test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bi-qa
+          path: qa-results/
+          retention-days: 7
+      - name: Prepare website
+        run: |
+          mkdir -p _site
+          cp index.html .nojekyll _site/
+          cp -R docs _site/docs
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Upload website
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - name: Publish website
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Check public website and data
+        env:
+          SITE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          node --input-type=module <<'JS'
+          const url = process.env.SITE_URL;
+          const page = await fetch(new URL('docs/', url));
+          if (!page.ok || !(await page.text()).includes('latestMid')) throw new Error('Published dashboard is unavailable');
+          const response = await fetch(new URL('docs/data/bi.json', url));
+          const data = await response.json();
+          if (!response.ok || !data.history_initialized || !data.rows.length) throw new Error('Published source data is unavailable');
+          console.log('Verified published dashboard:', url, 'latest:', data.rows.at(-1));
+          JS
