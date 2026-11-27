@@ -146,13 +146,13 @@ try {
     await page.setViewportSize({ width, height });
     await chartSettled(page);
     await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: path.join(output, label + '.png'), fullPage: true });
     await check(label + ': no horizontal overflow and all rate summaries remain visible', async () => {
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Document overflows the viewport');
       for (const id of ['latestSell', 'latestBuy', 'latestMid', 'avgSell', 'avgBuy', 'avgMid']) {
         assert.ok(await page.locator('#' + id).isVisible(), id + ' visible');
         assert.ok(await page.locator('#' + id).evaluate(el => el.scrollWidth <= el.clientWidth + 1), id + ' does not clip its value');
       }
-      await page.screenshot({ path: path.join(output, label + '.png'), fullPage: true });
       return { width, height };
     });
   }
